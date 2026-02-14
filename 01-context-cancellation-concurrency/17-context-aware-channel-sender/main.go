@@ -10,6 +10,7 @@ import (
 )
 
 func main() {
+
 	df := DataFetcher{}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -40,7 +41,7 @@ type Result struct {
 }
 
 func (f *DataFetcher) Fetch(ctx context.Context, urls []string) <-chan Result {
-	resultChan := make(chan Result, len(urls))
+	resultChan := make(chan Result)
 
 	wg := sync.WaitGroup{}
 
@@ -51,7 +52,12 @@ func (f *DataFetcher) Fetch(ctx context.Context, urls []string) <-chan Result {
 				if err != nil {
 					res.Err = err
 				}
-				resultChan <- res
+
+				select {
+				case resultChan <- res:
+				case <-ctx.Done():
+					return
+				}
 			})
 		}(i, url)
 	}
