@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"runtime"
+	"sync"
 	"time"
-
-	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -22,14 +19,16 @@ func main() {
 		"https://dummyjson.com/users/2",
 		"https://dummyjson.com/users/3",
 		"https://dummyjson.com/users/4",
-		"https://dummyjson.com/users/5",
+		"https://httpbin.org/delay/5",
 	})
 
 	for r := range result {
-		slog.Info(string(r.Body))
+		if r.Err != nil {
+			slog.Error(r.Err.Error())
+		} else {
+			slog.Info(string(r.URL))
+		}
 	}
-
-	fmt.Println("count", runtime.NumGoroutine())
 }
 
 type DataFetcher struct{}
@@ -41,65 +40,52 @@ type Result struct {
 }
 
 func (f *DataFetcher) Fetch(ctx context.Context, urls []string) <-chan Result {
-	errgrp, ctx := errgroup.WithContext(ctx)
+	resultChan := make(chan Result, len(urls))
 
-	resultChan := make(chan Result)
+	wg := sync.WaitGroup{}
 
 	for i, url := range urls {
-		errgrp.Go(func() error {
-			return singleFetch(ctx, url, i, resultChan)
-		})
+		func(idx int, u string) {
+			wg.Go(func() {
+				res, err := callAPI(ctx, u, idx)
+				if err != nil {
+					res.Err = err
+				}
+				resultChan <- res
+			})
+		}(i, url)
 	}
 
 	go func() {
-		defer close(resultChan)
-		if err := errgrp.Wait(); err != nil {
-			fmt.Printf("Encountered an error: %v\n", err)
-			r := Result{
-				Err: err,
-			}
-			resultChan <- r
-		}
+		wg.Wait()
+		close(resultChan)
 	}()
 
 	return resultChan
 }
 
-func singleFetch(ctx context.Context, url string, key int, resultChan chan<- Result) error {
-	singleResultChan := make(chan Result)
-	go callAPI(url, key, singleResultChan)
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case result := <-singleResultChan:
-		resultChan <- result
-		return nil
-	}
-}
-
-func callAPI(url string, key int, singleResultChan chan<- Result) {
+func callAPI(ctx context.Context, url string, key int) (Result, error) {
 	slog.Info("calling", "id", key)
-	if key == 2 {
-		time.Sleep(5 * time.Second)
+	result := Result{
+		URL: url,
 	}
 
-	result := Result{}
-	resByte, err := http.DefaultClient.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		result.Err = err
-		singleResultChan <- result
-		return
+		return result, err
+	}
+
+	resByte, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return result, err
 	}
 	defer resByte.Body.Close()
 
 	res, err := io.ReadAll(resByte.Body)
 	if err != nil {
-		result.Err = err
-		singleResultChan <- result
-		return
+		return result, err
 	}
 
 	result.Body = res
-	singleResultChan <- result
+	return result, nil
 }
